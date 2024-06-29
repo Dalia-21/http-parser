@@ -5,6 +5,7 @@ from request_parser import RequestParser
 class Server:
 
     chunk_length = 1024
+    telnet_termination_code = b'\xff\xf4\xff\xfd\x06'
     
     def __init__(self, port=8000):
         self.port = port
@@ -28,6 +29,11 @@ class Server:
         print(f"Accepted connection from {client_address}")
         
         while (chunk := client_socket.recv(Server.chunk_length)) != b'':
+            if chunk == Server.telnet_termination_code:
+                client_socket.close()
+                # Simpler than raising an exception, though arguably a bit of a hack
+                return "Connection was terminated by client"
+
             print(f"Received data: {chunk}")
             self.parser.add_chunk(chunk)
             if self.parser.end_transmission():
@@ -39,7 +45,6 @@ class Server:
         print("Connection closed")
 
         parsed_string = self.parser.request_to_string()
-        self.parser.reset()
         return parsed_string
 
     def close(self):

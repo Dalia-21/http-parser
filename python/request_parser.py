@@ -1,26 +1,23 @@
 class RequestParser:
 
     def __init__(self):
-        self.request_lines: list[str] = ""
+        self.lines: list[str] = ""
         self.request_method: str = ""
         self.path: str = ""
         self.http_version: str = ""
+        self.queries: dict[str, str] = {}
         self.headers: dict[str, str] = {}
         self.request_body: str = ""
         self.request_line_complete: bool = False
-        self.headers_complete: bool = False
         self.end_of_headers_received: bool = False
-        self.headers_received: bool = False
-        self.request_line_in_chunk: bool = False
 
     def reset(self):
         self.request_method = self.path \
         = self.http_version = self.request_body = ""
-        self.request_lines = []
+        self.lines = []
+        self.queries = {}
         self.headers = {}
-        self.request_line_complete = self.headers_complete = \
-        self.end_of_headers_received = self.headers_received = \
-        self.request_line_in_chunk = False
+        self.request_line_complete = self.end_of_headers_received = False
 
     def add_chunk(self, chunk: bytes) -> None:
         self.parse_request(chunk)
@@ -34,42 +31,49 @@ class RequestParser:
             return False  # Other methods not supported for simplicity
 
     def content_limit_reached(self) -> bool:
-        return len(self.request_body) >= int(self.headers["Content-Length"])
+        return "Content-Length" in self.headers \
+        and len(self.request_body) >= int(self.headers["Content-Length"])
 
     def parse_request(self, chunk: bytes) -> None:
         if b'\r\n\r\n' in chunk or chunk == b'\r\n':
             self.end_of_headers_received = True
-        self.headers_received = b': ' in chunk
-        self.lines = list(map(lambda x: x.decode(), chunk.split(b'\r\n')))
+        self.lines = RequestParser.convert_chunk_to_lines(chunk)
         
+        offset = 1 if not self.request_line_complete else 0
         if not self.request_line_complete:
             self.parse_request_line()
-        else:
-            self.request_line_in_chunk = False
         
-        end_headers_index = 0
-        if not self.headers_complete:
-            end_headers_index = self.parse_headers()
+        if all([(not self.headers), (b': ' in chunk), (not self.headers)]):
+            offset = self.parse_headers(offset)
         
-        if self.headers_complete:
-            self.parse_body(end_headers_index)
+        if self.end_of_headers_received:
+            self.parse_body(offset)
+
+    @staticmethod
+    def convert_chunk_to_lines(chunk: bytes) -> list[str]:
+        return list(map(lambda x: x.decode(), chunk.split(b'\r\n')))
 
     def parse_request_line(self):
         self.request_method, self.path, self.http_version = self.lines[0].split()
+        self.parse_queries()
         self.request_line_complete = True
-        self.request_line_in_chunk = True
 
-    def parse_headers(self) -> int:
-        if not self.headers_received:
-            return -1
-        for idx, line in enumerate(self.lines[1 if self.request_line_in_chunk else 0:]):
+    def parse_queries(self):
+        if "?" in self.path:
+            self.path, query_text = self.path.split("?")
+            query_entries = query_text.split("&")
+            for entry in query_entries:
+                entry_line = entry.split("=")
+                self.queries[entry_line[0]] = entry_line[1]
+
+    def parse_headers(self, offset: int) -> int:
+        for idx, line in enumerate(self.lines[offset:]):
             if ":" not in line and self.end_of_headers_received:
-                self.headers_complete = True
-                return idx + 1  # +1 to account for request line
+                return idx + offset
             if line:
                 header_line = line.split(": ")
                 self.headers[header_line[0]] = header_line[1]
-        return -1  # Chunk ended before headers finished
+        return 0  # Chunk ended before headers finished
 
     def parse_body(self, end_headers_index: int):
         self.request_body += "".join(self.lines[end_headers_index:])
@@ -79,6 +83,8 @@ class RequestParser:
 """
 > Request Method: {method}
 > Request Path:   {path}
+> Queries:
+{queries}
 > HTTP Version:   {version}
 
 > HEADERS:
@@ -88,11 +94,20 @@ class RequestParser:
 """.format(
             method=self.request_method,
             path=self.path,
+            queries=self.queries_to_string(),
             version=self.http_version,
             headers=self.headers_to_string(),
             body=self.request_body
         )
+        self.reset()
         return request_string
+
+    def queries_to_string(self):
+        queries_string = ""
+        for key, value in self.queries.items():
+            queries_string += f"> {key}: {value}\n"
+        queries_string += "\n"
+        return queries_string
 
     def headers_to_string(self):
         headers_string = ""
