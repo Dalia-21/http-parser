@@ -1,1 +1,6 @@
+# Python folders
 __pycache__
+venv
+
+# C++ build output
+request_parser
