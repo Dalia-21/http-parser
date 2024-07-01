@@ -1,5 +1,5 @@
 import socket
-from request_parser import RequestParser
+from request_parser import RequestParser, ParsingException
 
 
 class Server:
@@ -35,7 +35,15 @@ class Server:
                 return "Connection was terminated by client"
 
             print(f"Received data: {chunk}")
-            self.parser.add_chunk(chunk)
+       
+            try:
+                self.parser.add_chunk(chunk.decode())
+            except ParsingException as e:
+                print(e)
+                client_socket.send(b"HTTP/1.1 400 BAD-REQUEST\r\n\r\n")
+                client_socket.close()
+                return "Connection terminated due to bad request"
+                
             if self.parser.end_transmission():
                 break
         

@@ -1,3 +1,10 @@
+import re
+
+
+class ParsingException(Exception):
+    pass
+
+
 class RequestParser:
 
     def __init__(self):
@@ -22,14 +29,51 @@ class RequestParser:
 
     def add_chunk(self, chunk: bytes) -> None:
         self.parse_request(chunk)
+        try:
+            self.validate_request()
+        except ParsingException as e:
+            self.reset()
+            raise e
+
+    def validate_request(self):
+        if self.request_line_complete:
+            self.validate_request_line()
+        if self.headers_complete:
+            self.validate_headers()
+            if self.request_method in ["POST", "PATCH", "PUT", "DELETE"] and "Content-Length" in self.headers:
+                self.validate_request_body()
+
+    def validate_request_line(self) -> None:
+        if self.request_method.upper() not in ["GET", "POST", "PATCH", "PUT", "DELETE"]:
+            raise ParsingException(f"Unknown request method {self.request_method}")
+        http_version_expression = r'HTTP/[0-9]\.[0-9]'
+        if not re.search(http_version_expression, self.http_version):
+            raise ParsingException(f"Invalid HTTP version {self.http_version}")
+        if not self.path.startswith("/"):  # More complicated path matching is out of scope
+            raise ParsingException(f"Request path must start with /: {self.path}")
+
+    def validate_headers(self):
+        if self.request_method == "GET" and "Content-Length" in self.headers:
+            raise ParsingException("Content-Length header should not be present in GET request")
+        if self.request_method in ["POST", "PUT", "PATCH"] and "Content-Length" not in self.headers:
+            raise ParsingException("Content-Length header must be present for requests which expect a body")
+
+    def validate_request_body(self):
+        if len(self.request_body) > int(self.headers["Content-Length"]):
+            raise ParsingException(f"Body length: {len(self.request_body)} exceeds stated Content-Length: {int(self.headers["Content-Length"])}")
 
     def end_transmission(self) -> bool:
-        if self.request_method == "GET" and self.end_of_headers_received:
-            return True
-        elif self.request_method == "POST":
+        if self.request_method.upper() == "GET":
+            return self.end_of_headers_received
+        elif self.request_method.upper() in ["POST", "PATCH", "PUT"]:
             return self.content_limit_reached()
+        elif self.request_method.upper() == "DELETE":
+            if "Content-Length" in self.headers:
+                return self.content_limit_reached()
+            else:
+                return self.end_of_headers_received
         else:
-            return False  # Other methods not supported for simplicity
+            return False
 
     def content_limit_reached(self) -> bool:
         return "Content-Length" in self.headers \
