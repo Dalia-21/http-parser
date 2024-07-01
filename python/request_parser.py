@@ -9,6 +9,7 @@ class RequestParser:
         self.headers: dict[str, str] = {}
         self.request_body: str = ""
         self.request_line_complete: bool = False
+        self.headers_complete: bool = False
         self.end_of_headers_received: bool = False
 
     def reset(self):
@@ -17,7 +18,7 @@ class RequestParser:
         self.lines = []
         self.queries = {}
         self.headers = {}
-        self.request_line_complete = self.end_of_headers_received = False
+        self.request_line_complete = self.headers_complete = self.end_of_headers_received = False
 
     def add_chunk(self, chunk: bytes) -> None:
         self.parse_request(chunk)
@@ -34,24 +35,22 @@ class RequestParser:
         return "Content-Length" in self.headers \
         and len(self.request_body) >= int(self.headers["Content-Length"])
 
-    def parse_request(self, chunk: bytes) -> None:
-        if b'\r\n\r\n' in chunk or chunk == b'\r\n':
-            self.end_of_headers_received = True
-        self.lines = RequestParser.convert_chunk_to_lines(chunk)
+    def parse_request(self, chunk: str) -> None:
+        self.lines = chunk.split("\r\n")
         
         offset = 1 if not self.request_line_complete else 0
         if not self.request_line_complete:
             self.parse_request_line()
         
-        if all([(not self.headers), (b': ' in chunk), (not self.headers)]):
+        if "\r\n\r\n" in chunk or chunk == "\r\n":
+            self.end_of_headers_received = True
+            if len(self.lines) == 2:
+                self.headers_complete = True
+        if ":" in chunk and not self.headers_complete:
             offset = self.parse_headers(offset)
         
         if self.end_of_headers_received:
             self.parse_body(offset)
-
-    @staticmethod
-    def convert_chunk_to_lines(chunk: bytes) -> list[str]:
-        return list(map(lambda x: x.decode(), chunk.split(b'\r\n')))
 
     def parse_request_line(self):
         self.request_method, self.path, self.http_version = self.lines[0].split()
@@ -68,15 +67,21 @@ class RequestParser:
 
     def parse_headers(self, offset: int) -> int:
         for idx, line in enumerate(self.lines[offset:]):
-            if ":" not in line and self.end_of_headers_received:
-                return idx + offset
-            if line:
-                header_line = line.split(": ")
-                self.headers[header_line[0]] = header_line[1]
+            if RequestParser.is_valid_header_line(line):
+                key, value = line.split(":", 1)
+                self.headers[key] = value.strip()
+            else:
+                if self.end_of_headers_received:
+                    self.headers_complete = True
+                    return idx + offset
         return 0  # Chunk ended before headers finished
 
+    @staticmethod
+    def is_valid_header_line(line: str) -> bool:
+        return bool(line) and ":" in line and not line.isspace()
+
     def parse_body(self, end_headers_index: int):
-        self.request_body += "".join(self.lines[end_headers_index:])
+        self.request_body += "".join(list(filter(lambda x: not x.isspace(), self.lines[end_headers_index:])))
 
     def request_to_string(self) -> str:
         request_string = \
@@ -106,7 +111,6 @@ class RequestParser:
         queries_string = ""
         for key, value in self.queries.items():
             queries_string += f"> {key}: {value}\n"
-        queries_string += "\n"
         return queries_string
 
     def headers_to_string(self):
