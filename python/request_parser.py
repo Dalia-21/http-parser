@@ -176,13 +176,16 @@ class RequestParser:
     def queries_to_string(self):
         queries_string = ""
         for key, value in self.queries.items():
-            queries_string += f"> {key}: {value}\n"
+            queries_string += f"> {key:<{RequestParser.longest_line(self.queries.keys())}}: {value}\n"
         return queries_string
 
     def headers_to_string(self):
         headers_string = ""
         for key, value in self.headers.items():
-            headers_string += f"> {key}: {value}\n"
-        headers_string += "\n"
+            headers_string += f"> {key:<{RequestParser.longest_line(self.headers.keys())}}: {value}\n"
         return headers_string
+
+    @staticmethod
+    def longest_line(keys: list) -> int:
+        return max(map( lambda x: len(x), keys))
 
