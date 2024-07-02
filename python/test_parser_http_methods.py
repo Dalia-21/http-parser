@@ -11,7 +11,7 @@ class TestParserHTTPMethods:
 
     def test_end_transmission_GET_should_return_true(self):
         self.parser.request_method = "GET"
-        self.parser.end_of_headers_received = True
+        self.parser.headers_complete = True
 
         assert self.parser.end_transmission()
 
