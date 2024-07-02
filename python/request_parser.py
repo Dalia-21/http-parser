@@ -8,7 +8,6 @@ class ParsingException(Exception):
 class RequestParser:
 
     def __init__(self):
-        self.lines: list[str] = ""
         self.request_method: str = ""
         self.path: str = ""
         self.http_version: str = ""
@@ -17,23 +16,33 @@ class RequestParser:
         self.request_body: str = ""
         self.request_line_complete: bool = False
         self.headers_complete: bool = False
-        self.end_of_headers_received: bool = False
 
     def reset(self):
         self.request_method = self.path \
         = self.http_version = self.request_body = ""
-        self.lines = []
         self.queries = {}
         self.headers = {}
-        self.request_line_complete = self.headers_complete = self.end_of_headers_received = False
+        self.request_line_complete = self.headers_complete = False
 
-    def add_chunk(self, chunk: bytes) -> None:
-        self.parse_request(chunk)
+    def add_chunk(self, chunk: str) -> None:
         try:
+            self.parse_request(chunk)
             self.validate_request()
         except ParsingException as e:
             self.reset()
             raise e
+
+    def parse_request(self, chunk: str):
+        if RequestParser.whole_request_sent(chunk):
+            self.parse_whole_request(chunk)
+        else:
+            self.parse_line(chunk)
+
+    @staticmethod
+    def whole_request_sent(chunk: str) -> bool:
+        """A single line GET request will still end in a double carriage return, line feed.
+        A single line sent by telnet during an ongoing request will only have one carriage return and line feed."""
+        return "\r\n\r\n" in chunk
 
     def validate_request(self):
         if self.request_line_complete:
@@ -53,6 +62,9 @@ class RequestParser:
             raise ParsingException(f"Request path must start with /: {self.path}")
 
     def validate_headers(self):
+        for key in self.headers:
+            if not re.match(r'^[A-Za-z-]+$', key):
+                raise ParsingException(f"Invalid header key: {key} - keys must be only letters and dashes")
         if self.request_method == "GET" and "Content-Length" in self.headers:
             raise ParsingException("Content-Length header should not be present in GET request")
         if self.request_method in ["POST", "PUT", "PATCH"] and "Content-Length" not in self.headers:
@@ -60,18 +72,19 @@ class RequestParser:
 
     def validate_request_body(self):
         if len(self.request_body) > int(self.headers["Content-Length"]):
-            raise ParsingException(f"Body length: {len(self.request_body)} exceeds stated Content-Length: {int(self.headers["Content-Length"])}")
+            raise ParsingException(
+                f"Body length: {len(self.request_body)} exceeds stated Content-Length: {int(self.headers["Content-Length"])}")
 
     def end_transmission(self) -> bool:
         if self.request_method.upper() == "GET":
-            return self.end_of_headers_received
+            return self.headers_complete
         elif self.request_method.upper() in ["POST", "PATCH", "PUT"]:
             return self.content_limit_reached()
         elif self.request_method.upper() == "DELETE":
             if "Content-Length" in self.headers:
                 return self.content_limit_reached()
             else:
-                return self.end_of_headers_received
+                return self.headers_complete
         else:
             return False
 
@@ -79,53 +92,62 @@ class RequestParser:
         return "Content-Length" in self.headers \
         and len(self.request_body) >= int(self.headers["Content-Length"])
 
-    def parse_request(self, chunk: str) -> None:
-        self.lines = chunk.split("\r\n")
-        
-        offset = 1 if not self.request_line_complete else 0
-        if not self.request_line_complete:
-            self.parse_request_line()
-        
-        if "\r\n\r\n" in chunk or chunk == "\r\n":
-            self.end_of_headers_received = True
-            if len(self.lines) == 2:
-                self.headers_complete = True
-        if ":" in chunk and not self.headers_complete:
-            offset = self.parse_headers(offset)
-        
-        if self.end_of_headers_received:
-            self.parse_body(offset)
 
-    def parse_request_line(self):
-        self.request_method, self.path, self.http_version = self.lines[0].split()
+
+    def parse_line(self, chunk: str) -> None:
+        line = chunk.removesuffix("\r\n")
+
+        if not self.request_line_complete:
+            self.parse_request_line(line)
+            self.request_line_complete = True
+        elif not self.headers_complete:
+            if not line:
+                self.headers_complete = True
+            else:
+                self.parse_header(line)
+        else:
+            self.parse_body_line(line)
+        
+    def parse_whole_request(self, chunk: str) -> None:
+        request_line_and_headers, body = chunk.split("\r\n\r\n", 1)
+        request_line_and_headers = request_line_and_headers.split("\r\n")
+        self.parse_request_line(request_line_and_headers[0])
+        for header in request_line_and_headers[1:]:
+            self.parse_header(header)
+        self.headers_complete = True
+        for line in body.split("\r\n"):
+            self.parse_body_line(line)
+
+    def parse_request_line(self, request_line: str):
+        split_line = request_line.split(" ", 3)
+        if len(split_line) != 3:
+            raise ParsingException(f"Request line must contain method, path and verson: {request_line}")
+        self.request_method, self.path, self.http_version = split_line
+        self.request_method = self.request_method.upper()
         self.parse_queries()
         self.request_line_complete = True
 
     def parse_queries(self):
-        if "?" in self.path:
-            self.path, query_text = self.path.split("?")
-            query_entries = query_text.split("&")
-            for entry in query_entries:
-                entry_line = entry.split("=")
-                self.queries[entry_line[0]] = entry_line[1]
+        if "?" not in self.path:
+            return
+        self.path, query_text = self.path.split("?", 1)
+        query_entries = query_text.split("&")
+        for entry in query_entries:
+            entry_line = entry.split("=")
+            self.queries[entry_line[0]] = entry_line[1]
 
-    def parse_headers(self, offset: int) -> int:
-        for idx, line in enumerate(self.lines[offset:]):
-            if RequestParser.is_valid_header_line(line):
-                key, value = line.split(":", 1)
-                self.headers[key] = value.strip()
-            else:
-                if self.end_of_headers_received:
-                    self.headers_complete = True
-                    return idx + offset
-        return 0  # Chunk ended before headers finished
+    def parse_header(self, header_line: str) -> None:
+        """Header key is converted to title case, as this seems to be standard
+        for HTTP headers. Value is stripped of whitespace, since this is not meaningful.
+        Multiple colons are not expected in header values, but only one split is allowed
+        to prevent errors."""
+        if ":" not in header_line:
+            raise ParsingException(f"Invalid header line provided: {line}")
+        key, value = header_line.split(":", 1)
+        self.headers[key.title()] = value.strip()
 
-    @staticmethod
-    def is_valid_header_line(line: str) -> bool:
-        return bool(line) and ":" in line and not line.isspace()
-
-    def parse_body(self, end_headers_index: int):
-        self.request_body += "".join(list(filter(lambda x: not x.isspace(), self.lines[end_headers_index:])))
+    def parse_body_line(self, line: str):
+        self.request_body += line
 
     def request_to_string(self) -> str:
         request_string = \
